@@ -15,9 +15,11 @@ Two things live in this repo:
    tested, deployed change, with configurable human-in-the-loop approval
    at each stage.
 
-So far the pipeline wires up two stages: a ticket moves through `parse`
-and then `spec`, each an independent agent with its own approval pause
-and its own reject-with-feedback retry loop.
+So far the pipeline wires up three stages: a ticket moves through `parse`,
+`spec`, and `implement`. The first two are independent agents with their
+own approval pause and reject-with-feedback retry loop; `implement`
+writes real code on an isolated branch and is gated by a passing build
+instead of a human sign-off.
 
 ## Why an AI-SDLC pipeline
 
@@ -82,11 +84,36 @@ Stages wired up so far:
   Read-only (`allowedTools: ["Read"]`). Output: a concrete implementation
   spec (types, function signatures, edge cases, file layout), written to
   `specs/<id>.md`.
+- **implement** — input: the approved spec. Runs on its own function,
+  not the shared `runStage()` loop, because it doesn't fit that shape:
 
-Later sessions add `implement`, `review`, `test`, `QA`, and `deploy`,
-each with its own agent prompt under `agents/` and its own entry in
-`sdlc.config.json`. QA and deploy will always be hard gates — never
-configurable to `auto`.
+  ```
+  ensureBranch(id)          → creates/switches to feature/<id>, never main
+        │
+        ▼
+  callAgent(...)            → agent gets Read/Edit/Write/Bash access,
+                               writes real files in src/ itself
+        │
+        ▼
+  buildPasses()              → pipeline/gates.ts runs `npm run build`
+        │                      (a real exit code, not the agent's word for it)
+        ├─ pass → logged, pipeline continues
+        └─ fail → logged, pipeline throws and stops — inspect the branch
+  ```
+
+  There's no approve/reject pause here even though `sdlc.config.json` has
+  `implement` set to `"auto"` — the build gate is what stands in for human
+  review at this stage.
+
+Later sessions add `review`, `test`, `QA`, and `deploy`, each with its own
+agent prompt under `agents/` and its own entry in `sdlc.config.json`. QA
+and deploy will always be hard gates — never configurable to `auto`.
+
+**Known gap:** `sdlc.config.json`'s `implement.maxTurns` isn't enforced.
+The installed `claude` CLI has no turn-limiting flag (only
+`--max-budget-usd`, a dollar cap), so `maxTurns` is accepted by the code
+for forward compatibility but does nothing yet — the build gate is
+currently the only safety net for an unattended implement run.
 
 ## File structure
 
@@ -99,19 +126,23 @@ Swing Trading App/
 ├── tsconfig.json         TypeScript config for the pipeline code
 ├── agents/
 │   ├── parse.md          the parse agent's role prompt (read-only; turns a fuzzy request into tasks + acceptance criteria)
-│   └── spec.md           the spec agent's role prompt (read-only; turns approved criteria into types, function signatures, edge cases, file layout)
+│   ├── spec.md           the spec agent's role prompt (read-only; turns approved criteria into types, function signatures, edge cases, file layout)
+│   └── implement.md      the implement agent's role prompt (Read/Edit/Write/Bash; writes the spec as working code in src/)
 ├── tickets/
 │   └── 001.md            a feature request, written by hand, with parse agent output appended below the divider
 ├── specs/
 │   └── 001.md            the spec agent's output for this ticket (created once the spec stage runs)
+├── src/                  written by the implement agent, on branch feature/<id>
 ├── pipeline/
-│   └── run.ts            the orchestrator: a generic runStage() helper (build prompt, call agent, approve/reject-with-retry, save, log), plus a thin per-stage wrapper for parse and for spec
+│   ├── run.ts            the orchestrator: a generic runStage() helper for parse/spec, plus a standalone runStageImplement() (branch, agent, build gate)
+│   └── gates.ts          deterministic pass/fail checks (currently just `npm run build`) — no model involved
 └── runlog.jsonl          one JSON line appended per pipeline run (stage, ticket, mode, duration, approved, and feedback when rejected)
 ```
 
 ## Prerequisites
 
 - Node.js
+- Git (the implement stage creates and switches branches)
 - The `claude` CLI (Claude Code) installed and on your `PATH` — the
   orchestrator shells out to `claude -p` to invoke agents headlessly
 
@@ -129,9 +160,11 @@ Run the pipeline on a ticket:
 npm run sdlc run 001
 ```
 
-This runs `parse`, then (once approved) runs `spec` using the updated
-ticket, pausing for your approval at each configured stage. Every run —
-approved or rejected — is recorded in `runlog.jsonl`.
+This runs `parse`, then (once approved) `spec`, then `implement` — which
+switches to `feature/001`, lets the agent write real code, and stops the
+pipeline if `npm run build` doesn't pass afterward. `parse` and `spec`
+pause for your approval; every run, approved or rejected, is recorded in
+`runlog.jsonl`.
 
 To try a new feature request, create a new ticket file (e.g.
 `tickets/002.md`) with your own rough description, then run
@@ -145,10 +178,14 @@ To try a new feature request, create a new ticket file (e.g.
 {
   "stages": {
     "parse": { "mode": "approve" },
-    "spec": { "mode": "approve" }
+    "spec": { "mode": "approve" },
+    "implement": { "mode": "auto", "maxTurns": 30 }
   }
 }
 ```
+
+`implement.maxTurns` is not currently enforced (see the known gap above)
+— it's read from config but not passed to the CLI as a limit.
 
 - `"manual"` — you do the stage yourself; the pipeline doesn't touch it.
 - `"approve"` — the agent produces output, the pipeline pauses and asks

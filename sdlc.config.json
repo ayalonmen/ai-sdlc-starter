@@ -1,8 +1,11 @@
 {
   "_comment": "The autonomy dial. Each stage's mode is one of: 'manual' (you do it yourself), 'approve' (agent produces the artifact, pipeline pauses for your y/n), or 'auto' (agent runs, pipeline continues without asking). Session 1 only wires up 'parse' — later sessions add spec/implement/review/test, and QA + deploy stay hard gates that are never configurable to auto.",
   "stages": {
-    "parse": { "mode": "approve" },
+    "parse":     { "mode": "approve" },
     "spec":      { "mode": "approve" },
-    "implement": { "mode": "auto", "maxTurns": 30 }
+    "implement": { "mode": "auto", "maxTurns": 30 },
+    "review":    { "mode": "auto" },
+    "test":      { "mode": "auto" },
+    "qa":        { "mode": "gate" }
   }
 }
