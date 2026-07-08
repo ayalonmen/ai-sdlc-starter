@@ -1,9 +1,3 @@
-{"stage":"parse","ticket":"001","mode":"approve","durationMs":56075,"approved":true}
-{"stage":"parse","ticket":"001","mode":"approve","durationMs":69492,"approved":false}
-{"stage":"parse","ticket":"001","mode":"approve","durationMs":51117,"approved":true}
-{"stage":"parse","ticket":"001","mode":"approve","durationMs":113273,"approved":false,"feedback":"dont like the Stop-loss vs. signal-exit priority, change it to somting else"}
-{"stage":"parse","ticket":"001","mode":"approve","durationMs":58226,"approved":true}
-{"stage":"parse","ticket":"001","mode":"approve","durationMs":538460,"approved":false,"feedback":"nothing"}
-{"stage":"parse","ticket":"001","mode":"approve","durationMs":69344,"approved":true}
-{"stage":"spec","ticket":"001","mode":"approve","durationMs":90741,"approved":false,"feedback":"remove last Criterion spec element (14)"}
-{"stage":"spec","ticket":"001","mode":"approve","durationMs":28716,"approved":true}
+{"stage":"parse","ticket":"001","mode":"approve","durationMs":73824,"approved":true}
+{"stage":"spec","ticket":"001","mode":"approve","durationMs":79617,"approved":true}
+{"stage":"implement","ticket":"001","mode":"auto","branch":"feature/001","attempt":1,"durationMs":63744,"approved":true}

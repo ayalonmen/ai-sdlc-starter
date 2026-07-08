@@ -10,5 +10,5 @@
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["pipeline/**/*.ts"]
+  "include": ["pipeline/**/*.ts", "src/**/*.ts"]
 }
