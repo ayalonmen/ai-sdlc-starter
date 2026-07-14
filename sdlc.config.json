@@ -1,16 +1,17 @@
 {
   "_comment": "Autonomy dial per stage. mode is one of: 'approve' (agent produces its artifact, pipeline pauses for your y/n before saving; on reject it re-runs with your feedback), 'auto' (agent runs, pipeline continues without asking), or 'manual' (you do the stage yourself). mode governs the human pause for the text-producing stages (parse, spec, review). The gated stages run a deterministic orchestrator-side check regardless of mode: implement is gated by the product's syntax check, and qa by the full E2E suite + acceptance-criteria (AC-N) coverage. So qa is effectively a hard gate that mode cannot disable — 'auto' there only means 'do not pause for a human before the gate runs'. Deploy (not yet a stage) will likewise be a hard, non-configurable gate.",
+  "_comment_enabled": "Each stage also takes an 'enabled' flag (defaults to true when omitted). Set 'enabled': false to skip that stage entirely — no agent runs, no gate runs, and the dashboard shows the stage as 'skipped'. Skipping is literal, not smart: if you disable a stage whose artifact a later stage consumes (e.g. spec, which implement/review/test/qa all read via specs/<id>.md), that later stage fails when the artifact is missing. Disabling qa removes the authoritative ship gate — the pipeline will finish at the last enabled stage with nothing verifying acceptance criteria.",
   "project": {
     "productPath": "../Homebase",
     "knowledgePath": "../OKF"
   },
   "stages": {
-    "parse":     { "mode": "approve" },
-    "spec":      { "mode": "approve" },
-    "implement": { "mode": "auto", "maxTurns": 30 },
-    "review":    { "mode": "auto" },
-    "test":      { "mode": "auto" },
-    "qa":        { "mode": "auto" }
+    "parse":     { "enabled": true, "mode": "approve" },
+    "spec":      { "enabled": true, "mode": "approve" },
+    "implement": { "enabled": true, "mode": "auto", "maxTurns": 30 },
+    "review":    { "enabled": true, "mode": "auto" },
+    "test":      { "enabled": false, "mode": "auto" },
+    "qa":        { "enabled": true, "mode": "auto" }
   },
-  "learning": { "enabled": false }
+  "learning": { "enabled": true }
 }

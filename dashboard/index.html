@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDLC Pipeline Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:#0b0e13;color:#e6edf3;font-family:'IBM Plex Sans',system-ui,sans-serif;-webkit-font-smoothing:antialiased;font-size:14px;line-height:1.45}
+  button{font-family:inherit}
+  @keyframes sdlcPulse{0%,100%{opacity:1}50%{opacity:.3}}
+  @keyframes sdlcRing{0%{box-shadow:0 0 0 0 rgba(34,211,238,.45)}70%{box-shadow:0 0 0 7px rgba(34,211,238,0)}100%{box-shadow:0 0 0 0 rgba(34,211,238,0)}}
+  @keyframes sdlcDash{to{stroke-dashoffset:-28}}
+  @keyframes sdlcSpin{to{transform:rotate(360deg)}}
+  @keyframes sdlcFade{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+  @keyframes sdlcBlink{0%,100%{opacity:1}50%{opacity:.25}}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#2a323d;border-radius:8px}
+  ::-webkit-scrollbar-thumb:hover{background:#3a4552}
+  ::-webkit-scrollbar-track{background:transparent}
+  a{color:#4f9dff;text-decoration:none}
+  a:hover{color:#7ab4ff;text-decoration:underline}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script type="module">
+import { deriveModel, parseNdjson, fmtDur, fmtAgo, fmtCost, STAGES, COLORS, CAP } from './derive.mjs';
+
+// ============================================================================
+//  SDLC Pipeline Dashboard — vanilla rebuild of the DCLogic prototype, wired
+//  to the real pipeline artifacts served under /data/. All view-model math
+//  lives in ./derive.mjs (imported, never re-implemented here); this file is
+//  purely: fetch -> deriveModel -> render DOM -> repeat every 1.5s.
+// ============================================================================
+
+const ACCENT = '#4f9dff';
+const REAL_STAGES = STAGES.filter(s => !s.planned);   // 6 writing-flow stages
+const PRODUCT_COLOR = '#22d3ee';                       // single product per install
+
+// ---------- small helpers ----------------------------------------------------
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+function basename(p) {
+  return String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '—';
+}
+
+const statusMeta = s => ({
+  running: { label: 'Running',                color: COLORS.running },
+  waiting: { label: 'Waiting approval',       color: COLORS.waiting },
+  done:    { label: 'Done · QA passed',       color: COLORS.done },
+  blocked: { label: 'Blocked · needs human',  color: COLORS.blocked },
+}[s] || { label: 'In progress', color: '#8b98a5' });
+
+const gateMeta = g => ({
+  soft: { tag: 'APPROVE', color: '#c08a3e' },
+  hard: { tag: 'GATE',    color: '#3f8ea0' },
+}[g] || { tag: 'AUTO', color: '#5b6673' });
+
+// check-kind colors, per the model contract
+const KIND = { pass: '#34d399', fail: '#fb7185', infra: '#f5b83d', na: '#4a545f' };
+
+// generic kind color used by obs tiles / belt / outcome
+const kindColor = k => ({
+  done: COLORS.done, blocked: COLORS.blocked, waiting: COLORS.waiting,
+  failed: COLORS.failed, running: COLORS.running, todo: '#8b98a5', na: '#4a545f',
+}[k] || '#8b98a5');
+
+const modeColor = m => ({ auto: '#5b6673', approve: '#c08a3e', gate: '#3f8ea0', manual: '#8b98a5' }[m] || '#5b6673');
+
+const STAGE_STATE_LABEL = {
+  todo: 'not reached', running: 'running', waiting: 'awaiting approval',
+  done: 'passed', failed: 'rejected', planned: 'planned', skipped: 'skipped',
+};
+
+const dotAnim = state => state === 'running' ? 'sdlcPulse 1.5s ease-in-out infinite' : 'none';
+
+function pill(status) {
+  const m = statusMeta(status);
+  return `display:inline-flex;align-items:center;font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:600;letter-spacing:.2px;padding:2px 9px;border-radius:20px;color:${m.color};background:${m.color}1a;border:1px solid ${m.color}44;white-space:nowrap`;
+}
+
+// ---------- markdown renderer (vanilla port of the design's parseMd) ----------
+function mdInline(text) {
+  const re = /(\*\*([^*]+)\*\*|`([^`]+)`)/g;
+  let out = '', last = 0, m;
+  while ((m = re.exec(text))) {
+    out += esc(text.slice(last, m.index));
+    if (m[2] != null) out += `<strong style="color:#f0f5fa;font-weight:600">${esc(m[2])}</strong>`;
+    else out += `<code style="font-family:'IBM Plex Mono',monospace;font-size:12px;background:#12171d;border:1px solid #232b34;border-radius:4px;padding:1px 5px;color:#7fd6e6">${esc(m[3])}</code>`;
+    last = re.lastIndex;
+  }
+  out += esc(text.slice(last));
+  return out;
+}
+function cellColor(txt) {
+  const t = txt.trim().toUpperCase();
+  if (t === 'PASS' || t === 'SHIP') return '#34d399';
+  if (t.includes('FAIL') || t === 'NO-SHIP') return '#fb7185';
+  if (t.includes('INFRA')) return '#f5b83d';
+  return '#c9d4de';
+}
+function parseMd(src) {
+  if (!src) return '';
+  const lines = src.split('\n'); const out = []; let i = 0;
+  while (i < lines.length) {
+    let line = lines[i];
+    if (!line.trim()) { i++; continue; }
+
+    // fenced code block (real specs use ```ts ... ```) — enhancement over the mock
+    if (/^```/.test(line.trim())) {
+      i++; const code = [];
+      while (i < lines.length && !/^```/.test(lines[i].trim())) { code.push(lines[i]); i++; }
+      i++; // skip closing fence
+      out.push(`<pre style="margin:8px 0 14px;padding:12px 14px;background:#0c1016;border:1px solid #1c232c;border-radius:8px;overflow:auto"><code style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#a7d9c9;line-height:1.55">${esc(code.join('\n'))}</code></pre>`);
+      continue;
+    }
+    if (/^### /.test(line)) { out.push(`<h4 style="margin:18px 0 6px;font-size:13px;font-weight:600;color:#dbe4ec;letter-spacing:.2px">${mdInline(line.slice(4))}</h4>`); i++; continue; }
+    if (/^## /.test(line))  { out.push(`<h3 style="margin:20px 0 8px;font-size:15px;font-weight:600;color:#e6edf3">${mdInline(line.slice(3))}</h3>`); i++; continue; }
+    if (/^# /.test(line))   { out.push(`<h2 style="margin:2px 0 10px;font-size:17px;font-weight:700;color:#f0f5fa;line-height:1.3">${mdInline(line.slice(2))}</h2>`); i++; continue; }
+    if (/^---+$/.test(line.trim())) { out.push(`<hr style="border:none;border-top:1px solid #1c232c;margin:16px 0">`); i++; continue; }
+
+    if (/^\|/.test(line)) {
+      const rows = []; while (i < lines.length && /^\|/.test(lines[i])) { rows.push(lines[i]); i++; }
+      const cells = r => r.split('|').slice(1, -1).map(c => c.trim());
+      const header = cells(rows[0]); const body = rows.slice(2).map(cells);
+      const th = header.map(h => `<th style="text-align:left;padding:7px 11px;background:#12171d;border:1px solid #232b34;color:#8b98a5;font-weight:600;font-size:11px;letter-spacing:.3px;text-transform:uppercase">${mdInline(h)}</th>`).join('');
+      const tb = body.map(r => '<tr>' + r.map((c, ci) => {
+        const col = ci > 0 ? cellColor(c) : '#c9d4de';
+        const fam = ci > 0 ? "'IBM Plex Mono',monospace" : 'inherit';
+        const fw = ci > 0 ? 600 : 400;
+        return `<td style="padding:7px 11px;border:1px solid #1c232c;font-family:${fam};color:${col};font-weight:${fw}">${mdInline(c)}</td>`;
+      }).join('') + '</tr>').join('');
+      out.push(`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;margin:10px 0 14px;font-size:12.5px"><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table></div>`);
+      continue;
+    }
+    if (/^\s*[-*] /.test(line)) {
+      const items = []; while (i < lines.length && /^\s*[-*] /.test(lines[i])) { items.push(lines[i].replace(/^\s*[-*] /, '')); i++; }
+      out.push(`<ul style="margin:4px 0 12px;padding-left:20px;color:#c2cdd7">${items.map(it => `<li style="margin:4px 0">${mdInline(it)}</li>`).join('')}</ul>`);
+      continue;
+    }
+    // paragraph
+    const para = []; while (i < lines.length && lines[i].trim() && !/^(#|\||```|\s*[-*] |---)/.test(lines[i])) { para.push(lines[i]); i++; }
+    out.push(`<p style="margin:6px 0 10px;color:#b8c3cd">${mdInline(para.join(' '))}</p>`);
+  }
+  return out.join('');
+}
+
+// ============================================================================
+//  STATE + DATA
+// ============================================================================
+const state = { view: 'overview', heroId: null, detailId: null, artifactTab: {} };
+
+let model = {
+  now: Date.now(), tickets: [],
+  topStats: { running: 0, waiting: 0, blocked: 0, done: 0, qaRate: 0 },
+  activity: [], gateResults: [],
+  obs: { tiles: [], stageAgg: [], beltHot: [] },
+};
+let productName = '—';
+
+let config = null, configFetched = false;
+const titleCache = new Map();      // id -> { title, branch }
+const artifactCache = new Map();   // "dir/id" -> { status:'ok'|'missing', body }
+const prefetched = new Set();      // ids we've kicked a full artifact prefetch for
+
+const DIRS = ['tickets', 'specs', 'reviews', 'qa', 'retros'];
+const TABS = [
+  ['ticket', 'Ticket',    'tickets'],
+  ['spec',   'Spec',      'specs'],
+  ['review', 'Review',    'reviews'],
+  ['qa',     'QA Report', 'qa'],
+  ['retro',  'Retro',     'retros'],
+];
+const MISS_NOTE = {
+  ticket: 'No ticket file found for this id.',
+  spec:   'The Spec stage has not produced output yet.',
+  review: 'The Review stage has not produced output yet.',
+  qa:     'The QA gate has not run yet — earlier stages may still be in progress or awaiting approval.',
+  retro:  'No retrospective has been written for this ticket yet.',
+};
+
+async function fetchText(url) { try { const r = await fetch(url); return r.ok ? await r.text() : ''; } catch { return ''; } }
+async function fetchJson(url) { try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch { return null; } }
+
+function stripNum(s) { return s.replace(/^\d+\s*[·:]\s*/, ''); }
+function extractTitle(md, id) {
+  if (md) {
+    const h = md.match(/^#{1,6}\s+(.+)$/m);
+    if (h) return stripNum(h[1].trim());
+    const first = md.split('\n').map(l => l.trim()).find(Boolean);
+    if (first) return stripNum(first);
+  }
+  return 'Ticket ' + id;
+}
+
+async function fetchArtifact(dir, id) {
+  try {
+    const r = await fetch('/data/' + dir + '/' + id + '.md');
+    return r.ok ? { status: 'ok', body: await r.text() } : { status: 'missing' };
+  } catch { return { status: 'missing' }; }
+}
+async function loadArtifact(dir, id) {
+  const key = dir + '/' + id;
+  if (artifactCache.has(key)) return artifactCache.get(key);
+  const rec = await fetchArtifact(dir, id);
+  artifactCache.set(key, rec);
+  return rec;
+}
+async function prefetchAll(id) {
+  if (prefetched.has(id)) return;
+  prefetched.add(id);
+  await Promise.all(DIRS.map(d => loadArtifact(d, id)));
+  rerender();
+}
+// The cache above is write-once — right for a finished ticket, but it froze the
+// Ticket/Spec/Review/QA/Retro tabs at whatever existed when the detail view
+// first opened, so a stage that finished mid-run only appeared after a reload.
+// This RE-fetches the currently open ticket's artifacts (5 tiny localhost reads)
+// each poll, so each file shows up as its agent writes it. Returns true only
+// when something actually changed, so the caller repaints solely on real updates.
+async function refreshOpenArtifacts(id) {
+  if (!id) return false;
+  let changed = false;
+  await Promise.all(DIRS.map(async d => {
+    const rec = await fetchArtifact(d, id);
+    const key = d + '/' + id;
+    const prev = artifactCache.get(key);
+    if (!prev || prev.status !== rec.status || prev.body !== rec.body) {
+      artifactCache.set(key, rec);
+      changed = true;
+    }
+  }));
+  return changed;
+}
+function defaultTab(id) {
+  for (const [tab, , dir] of [['qa', 0, 'qa'], ['review', 0, 'reviews'], ['spec', 0, 'specs'], ['ticket', 0, 'tickets'], ['retro', 0, 'retros']]) {
+    const rec = artifactCache.get(dir + '/' + id);
+    if (rec && rec.status === 'ok') return tab;
+  }
+  return 'ticket';
+}
+
+// ---------- the poll ----------
+async function refresh() {
+  const [evText, rlText] = await Promise.all([
+    fetchText('/data/events.jsonl'),
+    fetchText('/data/runlog.jsonl'),
+  ]);
+  const events = parseNdjson(evText);
+  const runlog = parseNdjson(rlText);
+
+  if (!configFetched) { config = await fetchJson('/data/sdlc.config.json'); configFetched = true; }
+
+  // product name for the header
+  const runStarted = events.find(e => e.type === 'run_started' && e.product);
+  if (runStarted) productName = runStarted.product;
+  else if (config && config.project && config.project.productPath) productName = basename(config.project.productPath);
+  else productName = '—';
+
+  // build meta: unique ticket ids across both sources
+  const ids = [...new Set([...runlog, ...events].map(e => e && e.ticket).filter(Boolean).map(String))];
+  const meta = {};
+  await Promise.all(ids.map(async id => {
+    if (!titleCache.has(id)) {
+      const md = await fetchText('/data/tickets/' + id + '.md');
+      const title = extractTitle(md, id);
+      const implEnt = runlog.find(e => String(e.ticket) === id && e.stage === 'implement' && e.branch);
+      const branch = (implEnt && implEnt.branch) || ('feature/' + id);
+      titleCache.set(id, { title, branch });
+    }
+    const t = titleCache.get(id);
+    meta[id] = { title: t.title, branch: t.branch, config };
+  }));
+
+  model = deriveModel({ runlog, events, meta, now: Date.now() });
+
+  // default / repair the selected hero + detail tickets
+  if (model.tickets.length) {
+    if (!model.tickets.some(t => t.id === state.heroId)) state.heroId = model.tickets[0].id;
+    if (!state.detailId || !model.tickets.some(t => t.id === state.detailId)) state.detailId = model.tickets[0].id;
+  }
+
+  // Keep the open detail view's artifacts live as agents finish. Only the one
+  // open ticket is polled; a real change forces a repaint even when the model
+  // signature (events/runlog) is otherwise unchanged.
+  if (state.view === 'detail' && state.detailId && await refreshOpenArtifacts(state.detailId)) {
+    rerender();
+    return;
+  }
+  maybeRender();
+}
+
+// ============================================================================
+//  RENDER
+// ============================================================================
+function buildShell() {
+  document.getElementById('app').innerHTML = `
+  <div style="display:flex;flex-direction:column;height:100vh;min-height:600px;overflow:hidden;background:#0b0e13">
+    <header style="display:flex;align-items:center;gap:20px;padding:0 18px;height:56px;flex:0 0 auto;background:#0e1218;border-bottom:1px solid #1c232c;z-index:20">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,#22d3ee,#4f9dff);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:#06121a">S</div>
+        <div style="display:flex;flex-direction:column;line-height:1.1">
+          <span style="font-weight:600;font-size:14px;letter-spacing:.2px">SDLC Pipeline</span>
+          <span style="font-size:10.5px;color:#5c6773;letter-spacing:.3px">multi-agent orchestrator</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:7px;padding:5px 10px;border:1px solid #1c232c;border-radius:8px;background:#0b0f15">
+        <span style="width:7px;height:7px;border-radius:50%;background:#34d399;animation:sdlcBlink 1.8s ease-in-out infinite"></span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8b98a5">tailing</span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#c9d4de">events.jsonl</span>
+      </div>
+      <div id="topstats" style="display:flex;align-items:stretch;gap:8px;margin-left:4px"></div>
+      <div style="flex:1"></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:11px;color:#5c6773">Product</span>
+        <div id="product" style="display:flex;align-items:center;gap:7px;padding:5px 11px;background:#0b0f15;border:1px solid #1c232c;border-radius:8px"></div>
+      </div>
+      <div id="clock" style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8b98a5;padding-left:6px;border-left:1px solid #1c232c"></div>
+    </header>
+    <div style="display:flex;flex:1;min-height:0">
+      <nav id="nav" style="flex:0 0 210px;display:flex;flex-direction:column;background:#0e1218;border-right:1px solid #1c232c;padding:14px 10px;gap:3px"></nav>
+      <main id="main" style="flex:1;min-width:0;overflow:auto;position:relative"></main>
+    </div>
+  </div>`;
+  document.getElementById('app').addEventListener('click', onClick);
+  document.getElementById('app').addEventListener('dblclick', onDblClick);
+}
+
+function renderClock() {
+  const el = document.getElementById('clock'); if (!el) return;
+  const d = new Date();
+  el.textContent = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' · ' +
+                   d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function renderTopStats() {
+  const s = model.topStats;
+  const chips = [
+    { label: 'Running',     value: String(s.running), color: COLORS.running },
+    { label: 'Waiting',     value: String(s.waiting), color: COLORS.waiting },
+    { label: 'Blocked',     value: String(s.blocked), color: COLORS.blocked },
+    { label: 'QA 1st-pass', value: s.qaRate + '%',    color: s.qaRate >= 50 ? COLORS.done : COLORS.failed },
+    { label: 'Spend',       value: fmtCost(null),     color: '#c9d4de' },
+  ];
+  setHtml(document.getElementById('topstats'), chips.map(c => `
+    <div style="display:flex;flex-direction:column;justify-content:center;padding:4px 12px;border:1px solid #1c232c;border-radius:8px;background:#0b0f15;min-width:78px">
+      <span style="font-size:10px;color:#5c6773;letter-spacing:.4px;text-transform:uppercase">${esc(c.label)}</span>
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:600;color:${c.color}">${esc(c.value)}</span>
+    </div>`).join(''));
+}
+
+function renderProduct() {
+  setHtml(document.getElementById('product'),
+    `<span style="width:8px;height:8px;border-radius:2px;background:${PRODUCT_COLOR}"></span>` +
+    `<span style="font-size:12px;color:#c9d4de">${esc(productName)}</span>`);
+}
+
+function renderNav() {
+  const navDef = [
+    { key: 'overview',      label: 'Overview',      icon: '▦' },
+    { key: 'tickets',       label: 'Tickets',       icon: '≡', badge: String(model.tickets.length) },
+    { key: 'gates',         label: 'Gate results',  icon: '◆' },
+    { key: 'observability', label: 'Observability', icon: '∿' },
+  ];
+  const items = navDef.map(n => {
+    const active = state.view === n.key || (state.view === 'detail' && n.key === 'tickets');
+    const st = active
+      ? `background:${ACCENT}1c;color:#e6edf3;box-shadow:inset 2px 0 0 ${ACCENT}`
+      : 'background:transparent;color:#8b98a5';
+    const badge = n.badge
+      ? `<span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#7d8892;background:#12171d;border-radius:5px;padding:1px 6px">${esc(n.badge)}</span>`
+      : '';
+    return `<button data-act="nav" data-view="${n.key}" style="display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:8px;border:none;cursor:pointer;font-size:13px;width:100%;${st}">
+      <span style="width:16px;text-align:center;font-size:14px">${n.icon}</span>
+      <span style="flex:1;text-align:left">${esc(n.label)}</span>${badge}</button>`;
+  }).join('');
+
+  const legend = [
+    ['Passed', COLORS.done], ['Running', COLORS.running], ['Waiting approval', COLORS.waiting],
+    ['Rejected', COLORS.failed], ['Blocked', COLORS.blocked], ['Not reached', COLORS.todo],
+  ].map(([label, color]) => `
+    <div style="display:flex;align-items:center;gap:8px;padding:3px 0">
+      <span style="width:9px;height:9px;border-radius:3px;background:${color};flex:0 0 auto"></span>
+      <span style="font-size:11.5px;color:#a7b2bd;white-space:nowrap">${esc(label)}</span>
+    </div>`).join('');
+
+  setHtml(document.getElementById('nav'), `
+    <div style="font-size:10px;color:#4a545f;letter-spacing:.7px;text-transform:uppercase;padding:6px 10px 8px">Views</div>
+    ${items}
+    <div style="flex:1"></div>
+    <div style="margin:8px 6px 4px;padding:11px;border:1px solid #1c232c;border-radius:9px;background:#0b0f15">
+      <div style="font-size:10px;color:#4a545f;letter-spacing:.6px;text-transform:uppercase;margin-bottom:8px">State legend</div>
+      ${legend}
+    </div>`);
+}
+
+// ---------- OVERVIEW ----------
+function renderOverview() {
+  const tickets = model.tickets;
+  const hero = tickets.find(t => t.id === state.heroId) || tickets[0] || null;
+
+  // attention strip
+  const attn = tickets.filter(t => t.status === 'blocked' || t.status === 'waiting')
+    .sort((a, b) => (a.status === 'blocked' ? -1 : 1) - (b.status === 'blocked' ? -1 : 1));
+  const attention = attn.length ? `
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 18px">
+      ${attn.map(t => {
+        const sm = statusMeta(t.status);
+        const note = t.status === 'blocked'
+          ? `retry cap reached at QA — ${t.implAttempts} implement attempts`
+          : 'review produced — paused for y/n in terminal';
+        return `<button data-act="open" data-id="${esc(t.id)}" style="display:flex;align-items:center;gap:9px;padding:9px 13px;border-radius:9px;border:1px solid ${sm.color}44;background:${sm.color}12;cursor:pointer;text-align:left">
+          <span style="width:8px;height:8px;border-radius:50%;background:${sm.color};flex:0 0 auto;animation:${dotAnim(t.status === 'waiting' ? 'waiting' : 'blocked')}"></span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:${sm.color};font-weight:600">${esc(sm.label.split(' ')[0].toUpperCase())}</span>
+          <span style="font-size:12.5px;color:#c9d4de">#${esc(t.id)} ${esc(t.title)}</span>
+          <span style="font-size:11.5px;color:#8b98a5">— ${esc(note)}</span>
+        </button>`;
+      }).join('')}
+    </div>` : '';
+
+  // ticket list rows
+  const ticketRows = tickets.length ? tickets.map(t => {
+    const sm = statusMeta(t.status);
+    const cur = t.stages[t.current] || {};
+    const stColor = cur.state === 'todo' ? sm.color : (COLORS[cur.state] || sm.color);
+    const stLabel = cur.label || t.current;
+    const sel = state.heroId === t.id ? 'background:#12171d' : '';
+    return `<div data-act="hero" data-dbl data-id="${esc(t.id)}" style="display:flex;align-items:center;gap:11px;padding:9px 16px;border-bottom:1px solid #12171d;cursor:pointer;${sel}">
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#6b7682;width:30px;flex:0 0 auto">${esc(t.id)}</span>
+      <span style="width:6px;height:6px;border-radius:50%;background:${sm.color};flex:0 0 auto;animation:${dotAnim(cur.state)}"></span>
+      <span style="flex:1;min-width:0;font-size:13px;color:#dbe4ec;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.title)}</span>
+      <span style="font-size:11px;color:#7d8892;width:80px;flex:0 0 auto;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(productName)}</span>
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8b98a5;width:74px;flex:0 0 auto;text-align:right">${esc(stLabel)}</span>
+      <span style="${pill(t.status)}">${esc(sm.label)}</span>
+    </div>`;
+  }).join('') : emptyRow('No tickets yet — run the pipeline to see them here.');
+
+  // activity feed
+  const activity = model.activity.length ? model.activity.map(e => {
+    const color = COLORS[e.state] || '#8b98a5';
+    const fb = e.feedback ? `<div style="font-size:11px;color:#7d8892;margin-top:2px">↳ ${esc(e.feedback)}</div>` : '';
+    return `<div style="display:flex;align-items:flex-start;gap:10px;padding:7px 12px">
+      <span style="width:7px;height:7px;border-radius:50%;background:${color};flex:0 0 auto;margin-top:5px;animation:${dotAnim(e.state)}"></span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12.5px;color:#c9d4de"><span style="font-family:'IBM Plex Mono',monospace;color:#8b98a5">#${esc(e.ticket)}</span> ${esc(e.text)}</div>${fb}
+      </div>
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#5c6773;flex:0 0 auto;white-space:nowrap">${esc(e.ago)}</span>
+    </div>`;
+  }).join('') : `<div style="padding:26px 16px;text-align:center;color:#5c6773;font-size:12.5px">No activity yet.</div>`;
+
+  return `<div style="padding:20px 22px 40px;animation:sdlcFade .25s ease">
+    <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:4px">
+      <h1 style="margin:0;font-size:17px;font-weight:600;white-space:nowrap">Pipeline overview</h1>
+      <span style="font-size:12px;color:#5c6773">the "now" view · select a ticket to inspect its pipeline</span>
+    </div>
+    ${attention}
+    ${renderHeroCard(hero)}
+    <div style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px;margin-top:18px">
+      <section style="background:#0f141b;border:1px solid #1c232c;border-radius:12px;overflow:hidden">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #1c232c">
+          <span style="font-size:13px;font-weight:600">Tickets</span>
+          <span style="font-size:11px;color:#5c6773">click to load pipeline · double for detail</span>
+        </div>
+        ${ticketRows}
+      </section>
+      <section style="background:#0f141b;border:1px solid #1c232c;border-radius:12px;overflow:hidden">
+        <div style="padding:12px 16px;border-bottom:1px solid #1c232c;font-size:13px;font-weight:600">Recent activity</div>
+        <div style="padding:6px 4px 8px">${activity}</div>
+      </section>
+    </div>
+  </div>`;
+}
+
+function emptyRow(msg) {
+  return `<div style="padding:30px 16px;text-align:center;color:#5c6773;font-size:12.5px">${esc(msg)}</div>`;
+}
+
+function renderHeroCard(hero) {
+  if (!hero) {
+    return `<section style="background:#0f141b;border:1px solid #1c232c;border-radius:14px;padding:48px 24px;margin-top:6px;text-align:center;color:#5c6773">
+      <div style="font-size:14px;color:#8b98a5;margin-bottom:6px">No ticket selected</div>
+      <div style="font-size:12.5px">Run the pipeline (<span style="font-family:'IBM Plex Mono',monospace">npm run sdlc run &lt;id&gt;</span>) to populate this view.</div>
+    </section>`;
+  }
+  const sm = statusMeta(hero.status);
+
+  const nodes = STAGES.map(st => {
+    const s = hero.stages[st.key] || { state: 'todo', attempts: 0, durationMs: null };
+    const planned = st.planned;
+    const skipped = s.state === 'skipped';
+    const col = COLORS[s.state] || COLORS.todo;
+    const gm = gateMeta(st.gate);
+    const active = s.state !== 'todo' && s.state !== 'planned' && !skipped;
+    const gateTagColor = planned ? '#3a4552' : (skipped ? COLORS.skipped : gm.color);
+    const gateTag = skipped ? 'OFF' : gm.tag;
+    const durationLabel = (s.state === 'todo' || s.state === 'planned' || skipped) ? '—' : fmtDur(s.durationMs);
+    const stateLabel = STAGE_STATE_LABEL[s.state] || s.state;
+    const attemptsLabel = s.attempts > 1
+      ? `<span style="font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;color:#c084fc;background:#1e1630;border:1px solid #3a2a55;border-radius:5px;padding:1px 5px">×${s.attempts}</span>`
+      : '';
+    const boxBg = active ? col + '12' : '#0c1016';
+    const boxBorder = active ? col + '40' : '#1a2029';
+    const opacity = (planned || skipped) ? 'opacity:.55;' : '';
+    const barBg = `${gateTagColor}${st.gate === 'hard' ? '' : 'aa'}`;
+    const title = planned ? 'Deploy — planned, not implemented yet'
+      : (skipped ? 'Disabled in sdlc.config.json (enabled:false) — this stage is skipped' : '');
+    return `<div title="${title}" style="position:relative;overflow:hidden;padding:11px 12px 12px 14px;border-radius:10px;background:${boxBg};border:1px solid ${boxBorder};min-height:96px;${opacity}">
+      <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:${barBg}"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.5px;font-weight:600;color:${gateTagColor}">${gateTag}</span>${attemptsLabel}
+      </div>
+      <div style="display:flex;align-items:center;gap:7px;margin-top:9px">
+        <span style="width:9px;height:9px;border-radius:50%;background:${col};flex:0 0 auto;animation:${dotAnim(s.state)}"></span>
+        <span style="font-size:13.5px;font-weight:600;color:#dbe4ec">${esc(st.label)}</span>
+      </div>
+      <div style="margin-top:6px;font-size:11px;color:${col};font-weight:500">${esc(stateLabel)}</div>
+      <div style="margin-top:2px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:#6b7682">${esc(durationLabel)}</div>
+      ${s.activeDetail ? `<div style="margin-top:4px;font-family:'IBM Plex Mono',monospace;font-size:10px;color:${COLORS.running};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;animation:sdlcBlink 1.6s ease-in-out infinite">▸ ${esc(s.activeDetail)}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  // feedback belt geometry (7 nodes; impl idx 2, qa idx 5)
+  const xImpl = (2 + 0.5) / 7 * 1000, xQa = (5 + 0.5) / 7 * 1000;
+  const beltActive = hero.beltLoops > 0;
+  const beltStroke = beltActive ? COLORS.blocked : '#2a323d';
+  const beltAnim = beltActive ? 'animation:sdlcDash 1.1s linear infinite' : '';
+  const beltText = beltActive ? ('back to Implement · ×' + hero.beltLoops) : 'belt idle';
+  const badgeLeft = ((xImpl + xQa) / 2 / 1000 * 100).toFixed(1);
+
+  return `<section style="background:#0f141b;border:1px solid #1c232c;border-radius:14px;padding:22px 24px 16px;margin-top:6px">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:22px">
+      <div style="display:flex;flex-direction:column;gap:6px;min-width:0">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#8b98a5">#${esc(hero.id)}</span>
+          <h2 style="margin:0;font-size:18px;font-weight:600">${esc(hero.title)}</h2>
+          <span style="${pill(hero.status)}">${esc(sm.label)}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:14px;font-size:12px;color:#7d8892;flex-wrap:wrap">
+          <span style="display:flex;align-items:center;gap:6px"><span style="width:7px;height:7px;border-radius:2px;background:${PRODUCT_COLOR}"></span>${esc(productName)}</span>
+          <span style="font-family:'IBM Plex Mono',monospace">${esc(hero.branch)}</span>
+          <span>${hero.doneCount}/${hero.activeStageCount ?? REAL_STAGES.length} stages complete</span>
+        </div>
+      </div>
+      <button data-act="open" data-id="${esc(hero.id)}" style="flex:0 0 auto;font-size:12.5px;color:#4f9dff;padding:7px 12px;border:1px solid #1c2e44;border-radius:8px;background:#0c1826;white-space:nowrap;cursor:pointer">View full history →</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:10px;position:relative">${nodes}</div>
+    <div style="position:relative;height:74px;margin-top:2px">
+      <svg width="100%" height="74" viewBox="0 0 1000 150" preserveAspectRatio="none" style="position:absolute;inset:0;overflow:visible">
+        <path d="M ${xQa.toFixed(1)} 8 C ${xQa.toFixed(1)} 128, ${xImpl.toFixed(1)} 128, ${xImpl.toFixed(1)} 8" fill="none" stroke="${beltStroke}" stroke-width="${beltActive ? '2.5' : '1.5'}" stroke-dasharray="7 6" stroke-linecap="round" style="${beltAnim}"></path>
+        <circle cx="${xImpl.toFixed(1)}" cy="8" r="5" fill="${beltStroke}"></circle>
+      </svg>
+      <div style="position:absolute;left:${badgeLeft}%;top:44px;transform:translateX(-50%);display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;background:#0f141b;border:1px solid ${beltActive ? COLORS.blocked + '66' : '#232b34'};color:${beltActive ? COLORS.blocked : '#5c6773'}">
+        <span style="font-size:13px">↺</span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;font-weight:600">${esc(beltText)}</span>
+      </div>
+    </div>
+    <div style="text-align:center;margin-top:-4px;font-size:11px;color:#5c6773">feedback belt — routes failed work back to <span style="color:#8b98a5">Implement</span> (cap ${CAP} attempts)</div>
+  </section>`;
+}
+
+// ---------- TICKETS ----------
+function renderTickets() {
+  const rows = model.tickets.length ? model.tickets.map(t => {
+    const sm = statusMeta(t.status);
+    const cur = t.stages[t.current] || {};
+    const stColor = cur.state === 'todo' ? sm.color : (COLORS[cur.state] || sm.color);
+    const beltColor = t.beltLoops > 0 ? COLORS.blocked : '#4a545f';
+    const beltLabel = t.beltLoops > 0 ? ('↺ ×' + t.beltLoops) : '—';
+    return `<div data-act="open" data-id="${esc(t.id)}" style="display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid #12171d;cursor:pointer">
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8b98a5;width:34px;flex:0 0 auto">${esc(t.id)}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13.5px;color:#e6edf3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.title)}</div>
+        <div style="font-size:11px;color:#6b7682;font-family:'IBM Plex Mono',monospace;margin-top:2px">${esc(t.branch)}</div>
+      </div>
+      <span style="width:120px;flex:0 0 auto;display:flex;align-items:center;gap:7px;font-size:12px;color:#a7b2bd"><span style="width:7px;height:7px;border-radius:2px;background:${PRODUCT_COLOR}"></span>${esc(productName)}</span>
+      <span style="width:110px;flex:0 0 auto;display:flex;align-items:center;gap:7px;font-size:12.5px;color:#c9d4de"><span style="width:8px;height:8px;border-radius:50%;background:${stColor};animation:${dotAnim(cur.state)}"></span>${esc(cur.label || t.current)}</span>
+      <span style="width:70px;flex:0 0 auto;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:12px;color:${beltColor}">${esc(beltLabel)}</span>
+      <span style="width:120px;flex:0 0 auto;display:flex;justify-content:flex-end"><span style="${pill(t.status)}">${esc(sm.label)}</span></span>
+    </div>`;
+  }).join('') : emptyRow('No tickets yet.');
+
+  return `<div style="padding:20px 22px 40px;animation:sdlcFade .25s ease">
+    <h1 style="margin:0 0 16px;font-size:17px;font-weight:600">Tickets</h1>
+    <div style="background:#0f141b;border:1px solid #1c232c;border-radius:12px;overflow:hidden">
+      <div style="display:flex;align-items:center;gap:14px;padding:9px 16px;border-bottom:1px solid #1c232c;font-size:10.5px;color:#5c6773;letter-spacing:.4px;text-transform:uppercase">
+        <span style="width:34px;flex:0 0 auto">ID</span>
+        <span style="flex:1">Title</span>
+        <span style="width:120px;flex:0 0 auto">Product</span>
+        <span style="width:110px;flex:0 0 auto">Stage</span>
+        <span style="width:70px;flex:0 0 auto;text-align:center">Belt</span>
+        <span style="width:120px;flex:0 0 auto;text-align:right">Status</span>
+      </div>
+      ${rows}
+    </div>
+  </div>`;
+}
+
+// ---------- GATE RESULTS ----------
+function renderGates() {
+  const cards = model.gateResults.length ? model.gateResults.map(g => {
+    const vcol = g.passed ? COLORS.done : COLORS.failed;
+    const attempt = g.attempt > 1
+      ? `<span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#c084fc;background:#1e1630;border:1px solid #3a2a55;border-radius:5px;padding:1px 7px">attempt ${g.attempt}</span>`
+      : '';
+    const checks = (g.checks || []).map(c => {
+      const col = KIND[c.kind] || '#8b98a5';
+      return `<div style="padding:10px 12px;border-radius:8px;background:#0c1016;border:1px solid ${col}33">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <span style="font-size:11.5px;color:#8b98a5">${esc(c.label)}</span>
+          <span style="width:8px;height:8px;border-radius:50%;background:${col}"></span>
+        </div>
+        <div style="margin-top:5px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;color:${col}">${esc(c.value)}</div>
+      </div>`;
+    }).join('');
+    const feedback = g.feedback
+      ? `<div style="margin-top:11px;padding:9px 12px;background:#1a1214;border:1px solid #3a2226;border-radius:8px;font-size:12px;color:#e6a3aa"><span style="color:#fb7185;font-weight:600">feedback ·</span> ${esc(g.feedback)}</div>`
+      : '';
+    return `<div style="background:#0f141b;border:1px solid ${g.passed ? '#1c232c' : '#3a2226'};border-left:3px solid ${vcol};border-radius:12px;padding:16px 18px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:13px;flex-wrap:wrap">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;letter-spacing:.5px;padding:2px 9px;border-radius:6px;color:#3f8ea0;background:#3f8ea01a;border:1px solid #3f8ea044">${esc(g.gate)}</span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8b98a5">#${esc(g.ticket)}</span>
+        <span style="font-size:13.5px;color:#dbe4ec;font-weight:500">${esc(g.title)}</span>
+        ${attempt}
+        <span style="flex:1"></span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#5c6773">—</span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;padding:3px 11px;border-radius:20px;color:${vcol};background:${vcol}1a;border:1px solid ${vcol}44">${esc(g.verdict)}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">${checks}</div>
+      ${feedback}
+    </div>`;
+  }).join('') : emptyRow('No gate results yet — the QA gate has not run for any ticket.');
+
+  return `<div style="padding:20px 22px 40px;animation:sdlcFade .25s ease">
+    <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:16px">
+      <h1 style="margin:0;font-size:17px;font-weight:600;white-space:nowrap">Gate results</h1>
+      <span style="font-size:12px;color:#5c6773">deterministic checks for the QA gate — every attempt</span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:11px">${cards}</div>
+  </div>`;
+}
+
+// ---------- OBSERVABILITY ----------
+function renderObs() {
+  const obs = model.obs;
+  const tiles = obs.tiles.map(o => {
+    const col = kindColor(o.kind);
+    return `<div style="background:#0f141b;border:1px solid #1c232c;border-radius:11px;padding:14px 15px">
+      <div style="font-size:10.5px;color:#5c6773;letter-spacing:.4px;text-transform:uppercase">${esc(o.label)}</div>
+      <div style="margin-top:7px;font-family:'IBM Plex Mono',monospace;font-size:24px;font-weight:600;color:${col}">${esc(o.value)}</div>
+      <div style="margin-top:3px;font-size:11px;color:#7d8892">${esc(o.sub)}</div>
+    </div>`;
+  }).join('');
+
+  const stageRows = obs.stageAgg.map(s => {
+    const gm = gateMeta(s.gate);
+    const rateColor = s.rate >= 80 ? COLORS.done : s.rate >= 50 ? COLORS.waiting : COLORS.failed;
+    return `<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid #12171d">
+      <span style="width:96px;flex:0 0 auto;display:flex;align-items:center;gap:7px;font-size:12.5px;color:#dbe4ec"><span style="width:8px;height:8px;border-radius:2px;background:${gm.color};flex:0 0 auto"></span>${esc(s.label)}</span>
+      <div style="flex:1;display:flex;align-items:center;gap:9px">
+        <div style="flex:1;height:7px;border-radius:4px;background:#12171d;overflow:hidden">
+          <div style="height:100%;width:${s.rate}%;background:${rateColor};border-radius:4px"></div>
+        </div>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:${rateColor};width:38px;text-align:right">${s.rate}%</span>
+      </div>
+      <span style="width:56px;flex:0 0 auto;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8b98a5">${s.runs}</span>
+      <span style="width:62px;flex:0 0 auto;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8b98a5">${esc(fmtDur(s.avg))}</span>
+      <span style="width:62px;flex:0 0 auto;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8b98a5">${esc(fmtCost(s.spend))}</span>
+    </div>`;
+  }).join('');
+
+  const maxHot = Math.max(1, ...obs.beltHot.map(b => b.count));
+  const beltHot = obs.beltHot.map(b => {
+    const col = kindColor(b.kind);
+    const w = Math.max(2, (b.count / maxHot) * 100);
+    return `<div style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+        <span style="font-size:12.5px;color:#dbe4ec">${esc(b.label)}</span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:${col}">${esc(String(b.count))}</span>
+      </div>
+      <div style="height:8px;border-radius:5px;background:#12171d;overflow:hidden">
+        <div style="height:100%;width:${w}%;background:${col};border-radius:5px"></div>
+      </div>
+      <div style="font-size:10.5px;color:#6b7682;margin-top:4px">${esc(b.sub)}</div>
+    </div>`;
+  }).join('');
+
+  return `<div style="padding:20px 22px 40px;animation:sdlcFade .25s ease">
+    <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:16px">
+      <h1 style="margin:0;font-size:17px;font-weight:600">Observability</h1>
+      <span style="font-size:12px;color:#5c6773">evidence across all runs — is the pipeline trustworthy, and where does it struggle?</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px">${tiles}</div>
+    <div style="display:grid;grid-template-columns:1.6fr 1fr;gap:16px">
+      <section style="background:#0f141b;border:1px solid #1c232c;border-radius:12px;overflow:hidden">
+        <div style="padding:12px 16px;border-bottom:1px solid #1c232c;font-size:13px;font-weight:600">First-pass success &amp; effort, per stage</div>
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1px solid #161c24;font-size:10.5px;color:#5c6773;letter-spacing:.4px;text-transform:uppercase">
+          <span style="width:96px;flex:0 0 auto">Stage</span>
+          <span style="flex:1">First-pass</span>
+          <span style="width:56px;flex:0 0 auto;text-align:right">Runs</span>
+          <span style="width:62px;flex:0 0 auto;text-align:right">Avg</span>
+          <span style="width:62px;flex:0 0 auto;text-align:right">Spend</span>
+        </div>
+        ${stageRows}
+      </section>
+      <section style="background:#0f141b;border:1px solid #1c232c;border-radius:12px;overflow:hidden">
+        <div style="padding:12px 16px;border-bottom:1px solid #1c232c;font-size:13px;font-weight:600">Where the belt loops</div>
+        <div style="padding:14px 16px">
+          <div style="font-size:11.5px;color:#7d8892;margin-bottom:12px">Retries triggered by each gate, and the implement re-runs they caused.</div>
+          ${beltHot}
+        </div>
+      </section>
+    </div>
+  </div>`;
+}
+
+// ---------- TICKET DETAIL ----------
+function renderDetail() {
+  const sel = model.tickets.find(t => t.id === state.detailId) || model.tickets[0] || null;
+  if (!sel) {
+    return `<div style="padding:40px;text-align:center;color:#5c6773">No ticket to show. <button data-act="back" style="background:none;border:none;color:#4f9dff;cursor:pointer">Back</button></div>`;
+  }
+  const sm = statusMeta(sel.status);
+  const oCol = kindColor(sel.outcome.kind);
+
+  // timeline
+  const timeline = sel.timeline.length ? sel.timeline.map((ev, idx) => {
+    const col = COLORS[ev.state] || '#8b98a5';
+    const last = idx === sel.timeline.length - 1;
+    const label = ev.label + (ev.attempt > 1 ? ' · attempt ' + ev.attempt : '');
+    const mc = modeColor(ev.mode);
+    const loop = ev.loopBack
+      ? `<span style="display:inline-flex;align-items:center;gap:4px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#c084fc;background:#1e1630;border:1px solid #3a2a55;border-radius:5px;padding:1px 7px">↺ belt ${esc(ev.loopBack)}</span>`
+      : '';
+    const checks = (ev.gateChecks || []).length
+      ? `<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">${ev.gateChecks.map(gc => {
+          const c = KIND[gc.kind] || '#8b98a5';
+          return `<span style="font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;padding:2px 8px;border-radius:5px;color:${c};background:${c}1a;border:1px solid ${c}33">${esc(gc.label.toUpperCase())} ${esc(gc.value)}</span>`;
+        }).join('')}</div>`
+      : '';
+    const feedback = ev.feedback
+      ? `<div style="margin-top:8px;padding:8px 11px;background:#1a1214;border-left:2px solid #fb7185;border-radius:0 7px 7px 0;font-size:12px;color:#e0a7ac">${esc(ev.feedback)}</div>`
+      : '';
+    return `<div style="display:flex;gap:13px">
+      <div style="display:flex;flex-direction:column;align-items:center;flex:0 0 auto;width:16px">
+        <span style="width:13px;height:13px;border-radius:50%;background:${col};margin-top:15px;flex:0 0 auto;box-shadow:0 0 0 3px #0f141b;animation:${dotAnim(ev.state)}"></span>
+        <span style="flex:1;width:2px;min-height:14px;background:${last ? 'transparent' : '#1c232c'}"></span>
+      </div>
+      <div style="flex:1;min-width:0;padding:11px 0 4px">
+        <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+          <span style="font-size:13.5px;font-weight:600;color:#e6edf3">${esc(label)}</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.4px;font-weight:600;color:${mc};border:1px solid ${mc}44;border-radius:4px;padding:1px 6px">${esc((ev.mode || 'auto').toUpperCase())}</span>
+          ${loop}
+          <span style="flex:1"></span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:${col};font-weight:500">${esc(ev.stateLabel)}</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#6b7682">${esc(fmtDur(ev.durationMs))}</span>
+        </div>
+        ${checks}
+        ${feedback}
+      </div>
+    </div>`;
+  }).join('') : emptyRow('No stage history yet.');
+
+  // artifacts
+  const activeTab = state.artifactTab[sel.id] || defaultTab(sel.id);
+  prefetchAll(sel.id);
+  const dir = (TABS.find(t => t[0] === activeTab) || TABS[0])[2];
+  const rec = artifactCache.get(dir + '/' + sel.id);
+  let artBody;
+  if (!rec) {
+    artBody = `<div style="padding:50px 20px;text-align:center;color:#5c6773;font-size:12.5px">loading…</div>`;
+    loadArtifact(dir, sel.id).then(rerender);
+  } else if (rec.status === 'ok') {
+    artBody = `<div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#5c6773;margin-bottom:14px;padding-bottom:10px;border-bottom:1px dashed #1c232c">${esc(dir)}/${esc(sel.id)}.md</div><div>${parseMd(rec.body)}</div>`;
+  } else {
+    artBody = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:60px 20px;text-align:center">
+      <span style="width:36px;height:36px;border-radius:9px;border:1px dashed #2a323d;display:flex;align-items:center;justify-content:center;color:#4a545f;font-size:18px">∅</span>
+      <div style="font-size:13px;color:#8b98a5">Not produced yet</div>
+      <div style="font-size:11.5px;color:#5c6773;max-width:260px">${esc(MISS_NOTE[activeTab] || '')}</div>
+    </div>`;
+  }
+  const tabs = TABS.map(([key, label, d]) => {
+    const r = artifactCache.get(d + '/' + sel.id);
+    const avail = r && r.status === 'ok';
+    const active = key === activeTab;
+    const color = active ? '#e6edf3' : (avail ? '#8b98a5' : '#4a545f');
+    return `<button data-act="tab" data-tab="${key}" style="padding:8px 13px;border:none;border-bottom:2px solid ${active ? ACCENT : 'transparent'};background:none;cursor:pointer;font-size:12.5px;white-space:nowrap;color:${color};font-weight:${active ? 600 : 400}">${esc(label)}</button>`;
+  }).join('');
+
+  return `<div style="padding:18px 22px 40px;animation:sdlcFade .25s ease">
+    <button data-act="back" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#8b98a5;background:none;border:none;cursor:pointer;padding:4px 0;margin-bottom:12px">← Back to overview</button>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:6px">
+      <div style="min-width:0">
+        <div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:14px;color:#8b98a5">#${esc(sel.id)}</span>
+          <h1 style="margin:0;font-size:19px;font-weight:600">${esc(sel.title)}</h1>
+          <span style="${pill(sel.status)}">${esc(sm.label)}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:14px;font-size:12px;color:#7d8892;margin-top:6px;flex-wrap:wrap">
+          <span style="display:flex;align-items:center;gap:6px"><span style="width:7px;height:7px;border-radius:2px;background:${PRODUCT_COLOR}"></span>${esc(productName)}</span>
+          <span style="font-family:'IBM Plex Mono',monospace">${esc(sel.branch)}</span>
+        </div>
+      </div>
+      <div style="flex:0 0 auto;text-align:right;padding:9px 15px;border-radius:10px;background:${oCol}14;border:1px solid ${oCol}44;color:${oCol}">
+        <div style="font-size:10px;letter-spacing:.4px;text-transform:uppercase;opacity:.75">Outcome</div>
+        <div style="font-size:14px;font-weight:600;margin-top:2px">${esc(sel.outcome.text)}</div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:minmax(360px,1.05fr) 1.2fr;gap:16px;margin-top:16px;align-items:start">
+      <section style="background:#0f141b;border:1px solid #1c232c;border-radius:12px;overflow:hidden">
+        <div style="padding:12px 16px;border-bottom:1px solid #1c232c;font-size:13px;font-weight:600">Stage history <span style="color:#5c6773;font-weight:400">· in order, incl. belt loops</span></div>
+        <div style="padding:6px 16px 16px">${timeline}</div>
+      </section>
+      <section style="background:#0f141b;border:1px solid #1c232c;border-radius:12px;overflow:hidden;position:sticky;top:0">
+        <div style="display:flex;align-items:center;gap:2px;padding:8px 8px 0;border-bottom:1px solid #1c232c;flex-wrap:wrap">${tabs}</div>
+        <div style="padding:18px 22px;max-height:520px;overflow:auto;font-size:13px;line-height:1.6">${artBody}</div>
+      </section>
+    </div>
+    ${renderKbSection(sel)}
+  </div>`;
+}
+
+function renderKbSection(sel) {
+  const entries = Object.entries(sel.kbByStage || {});
+  let inner;
+  if (!entries.length) {
+    inner = `<div style="font-size:12px;color:#5c6773">No KB activity recorded for this ticket yet.</div>`;
+  } else {
+    inner = entries.map(([stageKey, info]) => {
+      const st = STAGES.find(s => s.key === stageKey);
+      const label = st ? st.label : stageKey;
+      const offered = !!info.offered;
+      const reads = info.reads || [];
+      const badgeCol = offered ? COLORS.done : '#5c6773';
+      const badge = `<span style="font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;padding:1px 8px;border-radius:20px;color:${badgeCol};background:${badgeCol}1a;border:1px solid ${badgeCol}44">${offered ? 'offered' : 'not offered'}</span>`;
+      let right;
+      if (reads.length) {
+        right = `<div style="display:flex;gap:6px;flex-wrap:wrap">${reads.map(f =>
+          `<span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:${ACCENT};background:${ACCENT}12;border:1px solid ${ACCENT}33;border-radius:5px;padding:2px 8px">${esc(f)}</span>`
+        ).join('')}</div>`;
+      } else {
+        right = `<span style="font-size:11.5px;color:#6b7682">${offered ? 'offered, none read' : 'none read'}</span>`;
+      }
+      return `<div style="display:flex;align-items:flex-start;gap:12px;padding:9px 0;border-bottom:1px solid #12171d">
+        <span style="width:82px;flex:0 0 auto;font-size:12.5px;color:#dbe4ec;font-weight:500">${esc(label)}</span>
+        <span style="flex:0 0 auto">${badge}</span>
+        <div style="flex:1;min-width:0">${right}</div>
+      </div>`;
+    }).join('');
+  }
+  return `<section style="background:#0f141b;border:1px solid #1c232c;border-radius:12px;overflow:hidden;margin-top:16px">
+    <div style="padding:12px 16px;border-bottom:1px solid #1c232c;display:flex;align-items:baseline;gap:10px">
+      <span style="font-size:13px;font-weight:600">Knowledge base</span>
+      <span style="font-size:11.5px;color:#5c6773">which stages reached for the KB, and the concept files they read</span>
+    </div>
+    <div style="padding:6px 16px 14px">${inner}</div>
+  </section>`;
+}
+
+// ---------- render orchestration ----------
+function currentViewHtml() {
+  switch (state.view) {
+    case 'tickets':       return renderTickets();
+    case 'gates':         return renderGates();
+    case 'observability': return renderObs();
+    case 'detail':        return renderDetail();
+    default:              return renderOverview();
+  }
+}
+// In-place DOM morph: patch the existing tree to match new HTML instead of
+// replacing it wholesale. Wholesale innerHTML= restarts every CSS animation
+// (the pulsing "running" dots, the belt dash) and reflows on EVERY poll during
+// an active run — that was the flicker. Morphing keeps node identity, so
+// animations stay continuous and scroll/hover/selection survive. Index-based
+// (no keys) is fine for our deterministic render.
+function setHtml(el, html) {
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  patchChildren(el, tmp);
+}
+function patchChildren(from, to) {
+  const f = [...from.childNodes], t = [...to.childNodes];
+  const n = Math.min(f.length, t.length);
+  for (let i = 0; i < n; i++) patchNode(f[i], t[i]);
+  for (let i = t.length; i < f.length; i++) from.removeChild(f[i]);
+  for (let i = f.length; i < t.length; i++) from.appendChild(t[i]); // moves node out of `to`
+}
+function patchNode(f, t) {
+  if (f.nodeType !== t.nodeType || f.nodeName !== t.nodeName) { f.replaceWith(t); return; }
+  if (f.nodeType === 3 || f.nodeType === 8) { if (f.nodeValue !== t.nodeValue) f.nodeValue = t.nodeValue; return; }
+  const fa = f.attributes, ta = t.attributes;
+  for (let i = fa.length - 1; i >= 0; i--) if (!t.hasAttribute(fa[i].name)) f.removeAttribute(fa[i].name);
+  for (let i = 0; i < ta.length; i++) if (f.getAttribute(ta[i].name) !== ta[i].value) f.setAttribute(ta[i].name, ta[i].value);
+  patchChildren(f, t);
+}
+
+function render() {
+  renderTopStats();
+  renderProduct();
+  renderNav();
+  setHtml(document.getElementById('main'), currentViewHtml());
+}
+
+function computeSig() {
+  const m = JSON.stringify({
+    st: model.topStats, p: productName,
+    t: model.tickets.map(t => [t.id, t.status, t.current, t.doneCount, t.beltLoops, t.timeline.length, t.lastTs, t.title, t.branch]),
+    a: model.activity.length, g: model.gateResults.length,
+  });
+  return [state.view, state.heroId, state.detailId, state.artifactTab[state.detailId] || '', m].join('|');
+}
+let lastSig = '';
+function rerender() { lastSig = computeSig(); render(); }
+function maybeRender() { if (computeSig() !== lastSig) rerender(); }
+
+// ---------- events ----------
+function onClick(e) {
+  const el = e.target.closest('[data-act]');
+  if (!el) return;
+  const act = el.getAttribute('data-act');
+  const id = el.getAttribute('data-id');
+  if (act === 'nav') { state.view = el.getAttribute('data-view'); rerender(); }
+  else if (act === 'hero') { state.heroId = id; rerender(); }
+  else if (act === 'open') { openDetail(id); }
+  else if (act === 'back') { state.view = 'overview'; rerender(); }
+  else if (act === 'tab') {
+    const tab = el.getAttribute('data-tab');
+    state.artifactTab[state.detailId] = tab;
+    const dir = (TABS.find(t => t[0] === tab) || TABS[0])[2];
+    if (!artifactCache.has(dir + '/' + state.detailId)) loadArtifact(dir, state.detailId).then(rerender);
+    rerender();
+  }
+}
+function onDblClick(e) {
+  const el = e.target.closest('[data-dbl][data-id]');
+  if (el) openDetail(el.getAttribute('data-id'));
+}
+function openDetail(id) {
+  state.detailId = id;
+  state.view = 'detail';
+  prefetchAll(id);
+  // Pull fresh now (don't trust a possibly-stale cache from an earlier open),
+  // then PIN the tab to the best artifact available at open time. Pinning means a
+  // later stage finishing updates that tab's content and lights the tab up, but
+  // never yanks you off the tab you're currently reading.
+  refreshOpenArtifacts(id).then(() => {
+    if (state.artifactTab[id] === undefined) state.artifactTab[id] = defaultTab(id);
+    rerender();
+  });
+  rerender();
+}
+
+// ============================================================================
+//  BOOT
+// ============================================================================
+buildShell();
+renderClock();
+render();               // paint empty shell immediately
+refresh();              // first data pull
+setInterval(refresh, 1500);
+setInterval(renderClock, 1000);
+</script>
+</body>
+</html>

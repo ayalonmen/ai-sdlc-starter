@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\USER\\\\Documents\\\\My Web Projects\\\\AI SDLC\\\\Homebase\\\\e2e\\\\run-e2e.ps1\")"
+    ]
+  }
+}

@@ -14,3 +14,12 @@
 {"stage":"curator-product","ticket":"002","durationMs":228278,"approved":true,"change":true,"branch":"kb/002-1783835981910-a1","pushed":true}
 {"stage":"qa","ticket":"002","mode":"auto","attempt":1,"durationMs":53444,"approved":true,"gateKind":"pass","gateSource":"coverage"}
 {"stage":"qa","ticket":"002","mode":"auto","attempt":1,"durationMs":78682,"approved":true,"gateKind":"pass","gateSource":"coverage"}
+{"stage":"parse","ticket":"003","mode":"approve","durationMs":105585,"approved":true}
+{"stage":"spec","ticket":"003","mode":"approve","durationMs":158721,"approved":true}
+{"stage":"implement","ticket":"003","mode":"auto","branch":"feature/003","attempt":1,"durationMs":183095,"approved":true,"gateKind":"pass"}
+{"stage":"review","ticket":"003","mode":"auto","durationMs":195112,"approved":true}
+{"stage":"test","ticket":"003","mode":"auto","durationMs":399374,"approved":true}
+{"stage":"parse","ticket":"004","mode":"approve","durationMs":42721,"approved":true}
+{"stage":"spec","ticket":"004","mode":"approve","durationMs":200128,"approved":true}
+{"stage":"implement","ticket":"004","mode":"auto","branch":"feature/004","attempt":1,"durationMs":265856,"approved":true,"gateKind":"pass"}
+{"stage":"review","ticket":"004","mode":"auto","durationMs":250749,"approved":true}

@@ -4,10 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "vitest run",
     "sdlc": "tsx pipeline/run.ts",
-    "build": "tsc --noEmit -p tsconfig.json",
-    "dev": "tsx src/index.ts"
+    "dashboard": "tsx dashboard/serve.ts",
+    "build": "tsc --noEmit -p tsconfig.json"
   },
   "repository": {
     "type": "git",
@@ -24,7 +23,6 @@
   "devDependencies": {
     "@types/node": "^26.1.0",
     "tsx": "^4.23.0",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "typescript": "^6.0.3"
   }
 }

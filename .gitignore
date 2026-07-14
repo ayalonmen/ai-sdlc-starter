@@ -9,7 +9,11 @@ dist/
 # run, not to this fork-per-project template. events.jsonl is the live UI
 # telemetry stream; runlog.jsonl is intentionally NOT ignored (it's the durable
 # resume state the orchestrator reads on restart).
-/tickets/
+#
+# tickets/ is kept in the repo (via .gitkeep) so the folder always exists for
+# you to drop a request into — but the ticket files themselves stay ignored.
+/tickets/*
+!/tickets/.gitkeep
 /specs/
 /reviews/
 /qa/

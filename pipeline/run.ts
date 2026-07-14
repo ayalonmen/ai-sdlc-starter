@@ -18,7 +18,9 @@ type StageMode = "manual" | "approve" | "auto";
 type ProjectConfig = { productPath: string; knowledgePath: string };
 type Config = {
   project: ProjectConfig;
-  stages: Record<string, { mode: StageMode; maxTurns?: number }>;
+  // enabled defaults to true when omitted; enabled:false skips the stage
+  // entirely (no agent, no gate) — see runNamedStage.
+  stages: Record<string, { mode: StageMode; maxTurns?: number; enabled?: boolean }>;
   // Optional post-ticket learning loop (Retrospector, then Curators). Off by
   // omission so the writing flow runs standalone on a fork that hasn't opted in.
   learning?: { enabled: boolean };
@@ -592,6 +594,10 @@ async function runStage(opts: StageOptions, ctx: Ctx, retry?: RetryContext): Pro
     return;
   }
 
+  // The pipeline is now blocked on a human y/n at the terminal. Emit telemetry
+  // so a live UI can show this stage as "waiting for approval" rather than
+  // "running" — the confirm() below produces no other signal while it blocks.
+  emitEvent("awaiting_approval", { ticket: opts.ticketId, stage: opts.stage });
   const approved = await confirm("Approve this output?");
   if (approved) {
     save();
@@ -677,6 +683,10 @@ async function runQaGate(ticketId: string, ctx: Ctx): Promise<GateResult> {
   }
 
   // Full E2E, with infra-failures retried HERE, never blamed on the agent.
+  // The E2E suite runs silently (one long command, minutes) after the qa AGENT
+  // has already finished — so emit a marker: without it a live UI shows qa
+  // "running" stuck on the agent's last tool call, looking frozen.
+  emitEvent("gate_started", { ticket: ticketId, stage: "qa", source: "e2e" });
   let e2e: GateResult | undefined;
   for (let attempt = 1; attempt <= MAX_INFRA_RETRIES + 1; attempt++) {
     e2e = await runE2E(ctx.paths.workdir, ctx.descriptor.e2e.run);
@@ -700,6 +710,7 @@ async function runQaGate(ticketId: string, ctx: Ctx): Promise<GateResult> {
         "to know where test files live (see .sdlc/product.json)."
     );
   }
+  emitEvent("gate_started", { ticket: ticketId, stage: "qa", source: "coverage" });
   return checkCoverage(ticketId, resolve(ctx.paths.workdir, testDir));
 }
 
@@ -934,6 +945,26 @@ async function runStageQa(ticketId: string, mode: StageMode, ctx: Ctx): Promise<
     }
 
     if (attempt >= MAX_QA_ATTEMPTS) break;
+
+    // The belt routes the fix to the stage that OWNS it: a coverage gap -> test
+    // (a covering test is MISSING), any other failure -> implement (the CODE is
+    // wrong). But an operator can turn a stage off (enabled:false), and the belt
+    // must honor that — the whole point of the flag — rather than silently
+    // running a stage the operator disabled. With the owning stage off, the
+    // pipeline can't auto-close this gap, so it stops for a human instead.
+    const beltTarget: Stage = gate.source === "coverage" ? "test" : "implement";
+    if (!stageEnabled(ctx, beltTarget)) {
+      console.log(
+        `QA ${gate.source} failure routes to the ${beltTarget} stage, but ${beltTarget} is disabled ` +
+          `(enabled:false) — stopping for a human rather than running a disabled stage.`
+      );
+      emitEvent("stage_finished", { ticket: ticketId, stage: "qa", approved: false, reason: "belt-target-disabled", beltTarget, attempt });
+      throw new Error(
+        `QA found a ${gate.source} failure for ticket ${ticketId} that the ${beltTarget} stage owns, but ` +
+          `${beltTarget} is disabled (enabled:false) in sdlc.config.json — the pipeline will not run a stage ` +
+          `you turned off. Re-enable ${beltTarget} (or resolve it by hand), then re-run QA.\n\n${gate.output}`
+      );
+    }
 
     if (gate.source === "coverage") {
       // A test is MISSING — the test stage owns this, not implement.
@@ -1238,6 +1269,16 @@ async function runCurator(ticketId: string, ctx: Ctx, which: "product"): Promise
   }
 }
 
+// A stage is enabled unless sdlc.config.json explicitly turns it off with
+// enabled:false. Single source of truth consulted BOTH by the main stage loop
+// (runNamedStage) and by the QA belt, so "disabled" means the same thing
+// everywhere: the stage never runs — not as a normal step, and not as a
+// belt-routed fix. An unconfigured stage is not "disabled" (runNamedStage skips
+// it separately, with a different note); this only reports the explicit off.
+function stageEnabled(ctx: Ctx, stage: Stage): boolean {
+  return ctx.config.stages[stage]?.enabled !== false;
+}
+
 // Runs one named stage if it's configured in sdlc.config.json, skipping
 // it (with a note) otherwise — same behavior main() already had per
 // stage, just centralized so main() can loop over STAGE_ORDER instead of
@@ -1246,6 +1287,17 @@ async function runNamedStage(stage: Stage, ticketId: string, ctx: Ctx): Promise<
   const stageConfig = ctx.config.stages[stage];
   if (!stageConfig) {
     console.log(`Skipping ${stage} (not configured in sdlc.config.json).`);
+    return;
+  }
+
+  // A stage can be turned off with "enabled": false. Skipping is literal: no
+  // agent runs and no gate runs. It's the operator's call — a later stage that
+  // reads this one's artifact (e.g. spec) will fail if that artifact is missing,
+  // and disabling qa removes the authoritative gate. Emit a telemetry event so a
+  // tailing dashboard can render the stage as "skipped" rather than "not reached".
+  if (!stageEnabled(ctx, stage)) {
+    console.log(`Skipping ${stage} (disabled in sdlc.config.json).`);
+    emitEvent("stage_skipped", { ticket: ticketId, stage, reason: "disabled" });
     return;
   }
 

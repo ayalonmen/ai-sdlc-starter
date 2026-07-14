@@ -1,0 +1,3 @@
+# Keeps the tickets/ folder in the repo even though ticket files themselves are
+# git-ignored. Drop a feature request here as tickets/<id>.md, then run:
+#   npm run sdlc run <id>
