@@ -13,5 +13,12 @@
     "test":      { "enabled": false, "mode": "auto" },
     "qa":        { "enabled": true, "mode": "auto" }
   },
-  "learning": { "enabled": true }
+  "learning": { "enabled": true },
+  "_comment_mcp": "Optional MCP wiring. 'configPath' points at an MCP-format file in THIS repo (default 'mcp.json') whose ${ENV} placeholders resolve from a gitignored .env (copy .env.example). 'stages' maps a stage to the MCP tool patterns it may call — a stage not listed gets no MCP, so removing this block restores the no-MCP behavior. Servers load with --strict-mcp-config (reproducible; ignores desktop/user/claude.ai connectors). Missing ${ENV} credentials fail fast at startup.",
+  "mcp": {
+    "configPath": "mcp.json",
+    "stages": {
+      "spec": ["mcp__MongoDB__*"]
+    }
+  }
 }

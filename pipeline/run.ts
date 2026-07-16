@@ -24,6 +24,14 @@ type Config = {
   // Optional post-ticket learning loop (Retrospector, then Curators). Off by
   // omission so the writing flow runs standalone on a fork that hasn't opted in.
   learning?: { enabled: boolean };
+  // Optional MCP wiring. `configPath` points at an MCP-format file in THIS repo
+  // (default "mcp.json") whose ${ENV} placeholders resolve from the loaded .env;
+  // `stages` maps a stage name to the tool patterns that stage may call (e.g.
+  // {"spec": ["mcp__MongoDB__*"]}). A stage not listed gets no MCP — so a fork
+  // with no `mcp` block behaves exactly as before. See mcpForStage / the preflight
+  // in main(). Servers are always loaded with --strict-mcp-config (reproducible;
+  // ignores desktop/user/claude.ai connectors).
+  mcp?: { configPath?: string; stages?: Record<string, string[]> };
 };
 
 type ProductComponent = { path: string; check: string; test?: string };
@@ -235,6 +243,33 @@ function readKbIndex(knowledgeDir: string): { dir: string; indexText: string } |
   return { dir: knowledgeDir, indexText: readFileSync(indexPath, "utf8") };
 }
 
+// Loads KEY=VALUE lines from a .env file into process.env WITHOUT overwriting
+// vars already present in the real environment (an explicit shell export wins).
+// Per-user MCP credentials live here (gitignored, never committed): a product's
+// .sdlc/mcp.json references them as ${VAR}, and since callAgent spawns the claude
+// child inheriting the orchestrator's process.env, loading them here is what lets
+// that expansion resolve. Intentionally tiny (no dotenv dependency — keeps the
+// "Node only, no deps" stack): KEY=VALUE, # comments, blank lines, and optional
+// surrounding quotes on the value. Not a full dotenv parser (no interpolation).
+function loadEnvFile(envPath: string): void {
+  if (!existsSync(envPath)) return;
+  for (const raw of readFileSync(envPath, "utf8").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    let val = line.slice(eq + 1).trim();
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+    if (!(key in process.env)) process.env[key] = val;
+  }
+}
+
 // Quotes each part and joins them into one command-line string, for
 // platforms that need shell: true. Node deprecates (DEP0190) passing an
 // args array alongside shell: true, because it has to join them into one
@@ -338,6 +373,9 @@ function callAgent(
     allowedTools?: string[];
     maxTurns?: number;
     addDir?: string;
+    // Absolute path to an .mcp.json giving this stage's agent live (MCP) tools.
+    // When set, callAgent passes --mcp-config <path> --strict-mcp-config.
+    mcpConfig?: string;
     // Tag emitted telemetry events so the UI can attribute them to a run/stage.
     ticket?: string;
     stage?: string;
@@ -352,12 +390,22 @@ function callAgent(
   // means the path is individually quoted on Windows (spaces-safe) and DEP0190
   // stays avoided. Do NOT move this into the spawn/command-string call sites.
   const dirArgs = opts?.addDir ? ["--add-dir", opts.addDir] : [];
+  // Load MCP servers for this stage from an EXPLICIT config path (a project
+  // .mcp.json auto-loads only after an interactive trust prompt — useless for a
+  // headless run). --strict-mcp-config makes the agent ignore every OTHER MCP
+  // source (user/desktop/claude.ai connectors) so a run sees ONLY what the
+  // product declares and is reproducible across forkers' machines. Woven into
+  // `args` HERE (like dirArgs), before the win32/POSIX fork below, so the path is
+  // individually quoted on Windows (spaces-safe) and DEP0190 stays avoided.
+  const mcpArgs = opts?.mcpConfig
+    ? ["--mcp-config", opts.mcpConfig, "--strict-mcp-config"]
+    : [];
   // stream-json emits one JSON event per line (assistant/tool_use/result/…);
   // the CLI rejects it in --print mode without --verbose.
   const streamArgs = ["--output-format", "stream-json", "--verbose"];
   const args = opts?.allowedTools
-    ? [...dirArgs, "--allowedTools", opts.allowedTools.join(","), ...streamArgs, "-p"]
-    : [...dirArgs, ...streamArgs, "-p"];
+    ? [...dirArgs, ...mcpArgs, "--allowedTools", opts.allowedTools.join(","), ...streamArgs, "-p"]
+    : [...dirArgs, ...mcpArgs, ...streamArgs, "-p"];
 
   const kbDir = opts.addDir;
 
@@ -560,6 +608,36 @@ type StageOptions = {
 // the agent revises instead of guessing again from scratch. Keeps
 // looping until the human approves. "auto" mode skips the pause entirely
 // since there's no human to ask.
+// Resolves which MCP tools (and the config file) a given stage should receive,
+// from sdlc.config.json's optional `mcp` block. Returns empty when the stage
+// isn't configured, so it behaves EXACTLY as before on a fork with no MCP. This
+// is the SINGLE place the stage->server policy is decided; the (few) agent call
+// sites just merge the returned tools into their allowedTools and hand mcpConfig
+// to callAgent (which adds --mcp-config <path> --strict-mcp-config).
+function mcpForStage(ctx: Ctx, stage: string): { mcpConfig?: string; tools: string[] } {
+  const tools = ctx.config.mcp?.stages?.[stage] ?? [];
+  if (tools.length === 0) return { tools: [] };
+  const configPath = resolve(ctx.config.mcp?.configPath ?? "mcp.json");
+  if (!existsSync(configPath)) {
+    throw new Error(
+      `sdlc.config.json enables MCP for stage "${stage}" but no MCP config file ` +
+        `exists at ${configPath} (set mcp.configPath; default "mcp.json").`
+    );
+  }
+  return { mcpConfig: configPath, tools };
+}
+
+// Finds ${VAR} references WITHOUT a ":-default" in an mcp.json's text — the
+// credentials the config REQUIRES from the environment. (${VAR:-x} is skipped:
+// it self-supplies a default, so it won't match this pattern.) Used by main()'s
+// preflight to fail fast, before any agent runs half-blind because a server
+// silently failed to start on a missing credential.
+function requiredMcpEnvVars(mcpText: string): string[] {
+  const req = new Set<string>();
+  for (const m of mcpText.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) req.add(m[1]);
+  return [...req];
+}
+
 async function runStage(opts: StageOptions, ctx: Ctx, retry?: RetryContext): Promise<void> {
   const startedAt = Date.now();
   const input = opts.getInput();
@@ -570,10 +648,12 @@ async function runStage(opts: StageOptions, ctx: Ctx, retry?: RetryContext): Pro
   emitEvent("agent_started", { ticket: opts.ticketId, stage: opts.stage, kb: { offered: !!kb, dir: kb ? kb.dir : undefined } });
 
   console.log(`\nRunning ${opts.stage} agent on ticket ${opts.ticketId}...\n`);
+  const mcp = mcpForStage(ctx, opts.stage);
   const output = await callAgent(prompt, {
     cwd: ctx.paths.workdir,
-    allowedTools: opts.allowedTools,
+    allowedTools: opts.allowedTools ? [...opts.allowedTools, ...mcp.tools] : opts.allowedTools,
     addDir: kb ? kb.dir : undefined,
+    mcpConfig: mcp.mcpConfig,
     ticket: opts.ticketId,
     stage: opts.stage,
   });
@@ -770,6 +850,7 @@ async function runStageImplement(
     ? { priorAttempt: "Your current implementation is on the feature branch — read it before changing.", feedback: seedFeedback }
     : undefined;
   let lastOutput = "";
+  const mcp = mcpForStage(ctx, "implement");
 
   for (let attempt = 1; attempt <= MAX_IMPLEMENT_ATTEMPTS; attempt++) {
     const prompt = buildPrompt(ctx.paths.workdir, "agents/implement.md", spec, retry, kb);
@@ -782,9 +863,10 @@ async function runStageImplement(
     );
     const report = await callAgent(prompt, {
       cwd: ctx.paths.workdir,
-      allowedTools: ["Read", "Edit", "Write"],
+      allowedTools: ["Read", "Edit", "Write", ...mcp.tools],
       maxTurns,
       addDir: kb ? kb.dir : undefined,
+      mcpConfig: mcp.mcpConfig,
       ticket: ticketId,
       stage: "implement",
     });
@@ -851,6 +933,7 @@ function writeReview(ticketId: string, output: string): void {
 async function runStageReview(ticketId: string, mode: StageMode, ctx: Ctx): Promise<void> {
   const spec = readSpec(ticketId);
   const kb = readKbIndex(ctx.paths.knowledgeDir);
+  const mcp = mcpForStage(ctx, "review");
 
   for (let attempt = 1; attempt <= MAX_REVIEW_ATTEMPTS; attempt++) {
     const startedAt = Date.now();
@@ -867,8 +950,9 @@ async function runStageReview(ticketId: string, mode: StageMode, ctx: Ctx): Prom
       console.log(`\nRunning review agent on ticket ${ticketId} (attempt ${attempt}/${MAX_REVIEW_ATTEMPTS})...\n`);
       const output = await callAgent(prompt, {
         cwd: ctx.paths.workdir,
-        allowedTools: ["Read"],
+        allowedTools: ["Read", ...mcp.tools],
         addDir: kb ? kb.dir : undefined,
+        mcpConfig: mcp.mcpConfig,
         ticket: ticketId,
         stage: "review",
       });
@@ -1556,6 +1640,35 @@ async function main(): Promise<void> {
   }
 
   const paths = resolvePaths(config);
+  // Load this project's per-user credentials (gitignored `.env` in THIS pipeline
+  // repo, next to sdlc.config.json and mcp.json) before any agent spawns, so MCP
+  // servers declared in mcp.json can expand ${ENV} placeholders from the inherited
+  // process.env. Kept in the pipeline repo (the per-project fork), never the
+  // product repo — the product repo carries no pipeline/credential files.
+  loadEnvFile(resolve(".env"));
+
+  // Fail fast on missing MCP credentials. If any stage enables MCP, every ${VAR}
+  // its config file requires must already be set (via .env or the real env) BEFORE
+  // an agent runs — otherwise a server silently fails to start and the stage runs
+  // WITHOUT the tools it was promised (silent capability loss, the worst failure
+  // mode). Better to stop here with an exact list than ship a spec written blind.
+  if (config.mcp?.stages && Object.values(config.mcp.stages).some((t) => t.length > 0)) {
+    const mcpPath = resolve(config.mcp.configPath ?? "mcp.json");
+    if (!existsSync(mcpPath)) {
+      throw new Error(
+        `sdlc.config.json configures mcp.stages but no MCP config file exists at ` +
+          `${mcpPath} (set mcp.configPath; default "mcp.json").`
+      );
+    }
+    const missing = requiredMcpEnvVars(readFileSync(mcpPath, "utf8")).filter((v) => !process.env[v]);
+    if (missing.length > 0) {
+      throw new Error(
+        `Missing credential(s) for MCP servers in ${mcpPath}: ${missing.join(", ")}.\n` +
+          `Set them in this repo's .env (see .env.example) or your environment before running.`
+      );
+    }
+  }
+
   const descriptor = readProductDescriptor(paths.workdir);
   const ctx: Ctx = { config, paths, descriptor };
 

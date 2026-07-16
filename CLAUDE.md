@@ -38,7 +38,9 @@ stack.
 - Windows-first: the claude/npm shims are `.cmd`, launched via `shell: true`
   with a pre-built command string (not an args array — avoids DEP0190);
   process trees are killed with `taskkill /T`. Preserve these when editing
-  `callAgent`/`ensureBranch`/`runCommand`.
+  `callAgent`/`ensureBranch`/`runCommand`. Any new `claude` CLI flag (e.g.
+  `--add-dir`, `--mcp-config`) must be woven into the `args` array *before* the
+  win32/POSIX fork in `callAgent`, so `quoteCommandLine` quotes it (spaces-safe).
 
 ## Stages
 
@@ -84,3 +86,17 @@ deterministic step, not a stage). Order and the auto-resume logic both walk
 - **Role prompts stay generic.** Anything product-specific comes from the
   product's own `CLAUDE.md` (loaded per run) and its `.sdlc/product.json` —
   never hardcode a product's stack, file layout, or domain into `agents/*`.
+- **MCP access is per-stage, config-driven, and pipeline-side.** Stages can be
+  given read-only MCP tools (a DB, error tracker, metrics) via `sdlc.config.json`'s
+  optional `mcp` block: `mcp.json` holds the server defs (`${ENV}` placeholders,
+  never literal secrets), a gitignored `.env` holds each user's credentials, and
+  `mcp.stages` maps a stage → the `mcp__<server>__*` tool patterns it may call.
+  All of this lives in THIS repo — never the product repo. Wiring is centralized
+  in `mcpForStage` (`run.ts`) and applied at every agent call site (`runStage`
+  plus the direct calls in implement/review). Servers always load with
+  `--strict-mcp-config` (reproducible; ignores desktop/user/claude.ai connectors),
+  and a preflight in `main()` fails fast if a required `${ENV}` credential is
+  unset. This adds read *context* for the model to propose from; it does not let
+  agents gate themselves — gates stay deterministic. Note claude.ai/Desktop OAuth
+  connectors are NOT usable here (not exportable, absent in headless strict runs);
+  use token-authenticated servers.

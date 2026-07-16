@@ -6,7 +6,11 @@
       "Bash(node \"C:/Users/USER/AppData/Local/Temp/claude/c--Users-USER-Documents-My-Web-Projects-AI-SDLC-ai-sdlc-starter/4d5be886-a990-400a-a54a-5f17e69a612b/scratchpad/gatechecks-test.mjs\")",
       "Bash(node \"C:/Users/USER/AppData/Local/Temp/claude/c--Users-USER-Documents-My-Web-Projects-AI-SDLC-ai-sdlc-starter/4d5be886-a990-400a-a54a-5f17e69a612b/scratchpad/curator-prose-test.mjs\")",
       "Bash(DASHBOARD_PORT=4397 npx tsx dashboard/serve.ts)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(gh auth *)",
+      "Bash(git --no-pager diff .claude/settings.json)",
+      "PowerShell(winget install --id GitHub.cli --accept-source-agreements --accept-package-agreements --silent)",
+      "Bash(git push *)"
     ]
   }
 }

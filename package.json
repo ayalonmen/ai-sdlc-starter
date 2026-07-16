@@ -10,16 +10,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ayalonmen/Swing-Trading-App.git"
+    "url": "git+https://github.com/montopay/ai-sdlc-starter.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/ayalonmen/Swing-Trading-App/issues"
+    "url": "https://github.com/montopay/ai-sdlc-starter/issues"
   },
-  "homepage": "https://github.com/ayalonmen/Swing-Trading-App#readme",
+  "homepage": "https://github.com/montopay/ai-sdlc-starter#readme",
   "devDependencies": {
     "@types/node": "^26.1.0",
     "tsx": "^4.23.0",
