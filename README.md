@@ -120,11 +120,16 @@ a ticket moves through.
 ai-sdlc-starter/            this repo — the pipeline (a template you fork per project)
 ├── README.md               this file
 ├── CLAUDE.md               shared context every agent reads first (what the repo is, stack, stages, conventions)
-├── sdlc.config.json        the control panel: product/knowledge paths, per-stage autonomy dial, learning toggle
+├── sdlc.config.json        the control panel: product/knowledge paths, per-stage autonomy dial, learning toggle, optional MCP wiring
+├── mcp.json                optional: MCP server definitions (live data/observability) with ${ENV} credential placeholders — see "Connecting live data"
+├── .env.example            template listing the credentials mcp.json needs — copy to .env and fill in
+├── .env                    (gitignored) your own MCP credentials — never committed
 ├── package.json            npm scripts: `sdlc` (orchestrator), `dashboard`, `build`
 ├── tsconfig.json           TypeScript config for the pipeline code
+├── .gitignore              ignores node_modules, .env, and the per-run artifact folders/logs
 ├── .claude/
-│   └── settings.json       Claude Code settings for the headless agent runs
+│   ├── settings.json       Claude Code settings for a session working ON this repo
+│   └── settings.local.json (gitignored) local Claude Code permission overrides
 ├── agents/                 one role prompt per agent — all generic, no product specifics
 │   ├── parse.md            fuzzy request → tasks + acceptance criteria (AC-N)
 │   ├── spec.md             criteria → technical spec (carries AC-N forward)
@@ -148,7 +153,8 @@ ai-sdlc-starter/            this repo — the pipeline (a template you fork per 
 ├── qa/                     written by the QA gate (deterministic) — qa/<id>.md
 ├── retros/                 written by retrospector (learning loop) — retros/<id>.md
 ├── curator/                curator run summary   (learning loop) — curator/<id>.md
-└── runlog.jsonl            one JSON line per stage attempt (stage, ticket, mode, gate result, belt routing, feedback)
+├── runlog.jsonl            one JSON line per stage attempt (stage, ticket, mode, gate result, belt routing, feedback)
+└── events.jsonl            (gitignored) fine-grained lifecycle events the dashboard tails (run/stage started, tool use, gate results)
 
 # outside this repo, set via sdlc.config.json:
 ../<product>/               project.productPath  — the product repo; code + tests land here on feature/<id>
@@ -228,7 +234,71 @@ artifact a later stage consumes (e.g. `spec`) and that later stage will fail
 when the artifact is missing. Disabling `qa` removes the authoritative ship
 gate.
 
+`sdlc.config.json` also takes an optional `mcp` block to give stages read-only
+access to live systems — see [Connecting live data & observability
+(MCP)](#connecting-live-data--observability-mcp) below.
+
 **Known gap:** `implement.maxTurns` isn't enforced — the installed `claude` CLI
 has no turn-limiting flag, so it's accepted for forward compatibility but does
 nothing yet. The syntax check is currently the only safety net for an
 unattended `implement` run.
+
+## Connecting live data & observability (MCP)
+
+Stages can optionally be given **read-only access to live systems** — a database,
+error tracker, metrics — via [MCP](https://modelcontextprotocol.io) servers, so
+an agent can inspect the real data model or production signals while it works
+(e.g. `spec` reading the actual collection shape before writing a spec). This is
+off unless configured, and everything lives in *this* pipeline repo — never the
+product repo, which stays a clean target.
+
+Three pieces:
+
+1. **`mcp.json`** (committed) — server definitions in Claude Code's MCP format,
+   with credentials referenced as `${ENV}` placeholders, never literals:
+
+   ```jsonc
+   {
+     "mcpServers": {
+       "MongoDB": {
+         "command": "npx",
+         "args": ["-y", "mongodb-mcp-server@latest", "--readOnly"],
+         "env": { "MDB_MCP_CONNECTION_STRING": "${MONGODB_URI}" }
+       }
+     }
+   }
+   ```
+
+2. **`.env`** (gitignored) — each user's own credentials. Copy `.env.example`,
+   fill it in. The orchestrator loads it into the environment before spawning any
+   agent, so the `${ENV}` placeholders in `mcp.json` resolve.
+
+3. **`sdlc.config.json` → `mcp`** — which stages may call which tools:
+
+   ```jsonc
+   "mcp": {
+     "configPath": "mcp.json",
+     "stages": { "spec": ["mcp__MongoDB__*"] }
+   }
+   ```
+   A stage not listed gets no MCP (so deleting this block restores the no-MCP
+   behavior). Tool names follow `mcp__<server>__<tool>`; wildcards like
+   `mcp__MongoDB__*` are allowed.
+
+Design guarantees:
+
+- **Reproducible.** Servers load with `--strict-mcp-config`, so a run sees only
+  what `mcp.json` declares — never your machine's Claude Desktop / claude.ai /
+  user-scoped connectors. Every fork behaves identically.
+- **Fail-fast.** If a stage enables MCP but a required `${ENV}` credential is
+  unset, the orchestrator errors at startup naming the missing variables — an
+  agent never runs half-blind because a server silently failed to start.
+- **Least privilege.** Tools are scoped per stage in `mcp.stages`; nothing is
+  granted globally, and the servers above are read-only.
+
+> **OAuth connectors don't work here.** claude.ai-brokered connectors (e.g.
+> Sentry or Datadog connected through the Claude Desktop / claude.ai UI) are
+> OAuth-based: they can't be exported to a token, don't survive the pipeline's
+> headless `--strict-mcp-config` runs, and don't transfer to forks. Use a
+> token-authenticated server in `mcp.json` instead — an API key or connection
+> string supplied via `.env`.
