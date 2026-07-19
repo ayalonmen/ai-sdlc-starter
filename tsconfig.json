@@ -7,8 +7,8 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "outDir": "dist",
+    "noEmit": true,
     "types": ["node"]
   },
-  "include": ["pipeline/**/*.ts"]
+  "include": ["pipeline/**/*.ts", "dashboard/**/*.ts"]
 }

@@ -6,7 +6,7 @@
   "scripts": {
     "sdlc": "tsx pipeline/run.ts",
     "dashboard": "tsx dashboard/serve.ts",
-    "build": "tsc --noEmit -p tsconfig.json"
+    "build": "tsc -p tsconfig.json"
   },
   "repository": {
     "type": "git",
